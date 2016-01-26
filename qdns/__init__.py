@@ -1,8 +1,10 @@
+# coding: utf-8
 import socket
 import logging
 import threading
 import Queue
 import time
+from dns.resolver import Resolver
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +52,13 @@ def configure(new_thread_count=None, new_cache_ttl=None):
         cache_ttl = new_cache_ttl
 
     launch_threads()
+
+
+def gethostsbyname(name, callback, **kwargs):
+    if stop_all.is_set():
+        return
+    log.info("Looking up hostname %s by gethostsbyname", name)
+    to_resolve.put(("gethostsbyname", name, callback, kwargs))
 
 
 def gethostbyname(name, callback, **kwargs):
@@ -158,7 +167,22 @@ class ResolverThread(threading.Thread):
     def __init__(self, **kwargs):
         super(ResolverThread, self).__init__(name='qdns_resolver', **kwargs)
         self.stop_event = threading.Event()
+        self.resolver = Resolver()
+        self.resolver.timeout = 5
+        self.nameservers = self.resolver.nameservers[:]
         self.start()
+
+    def gethostsbyname(self, name):
+        """ собираем ответы от всех серверов в один список """
+        result = []
+        for server in self.nameservers:
+            self.resolver.nameservers = [server]
+            try:
+                res = map(str, self.resolver.query(name))
+                result.extend(res)
+            except Exception as err:
+                pass
+        return name, sorted(set(result))
 
     def run(self):
         while True:
@@ -174,6 +198,8 @@ class ResolverThread(threading.Thread):
                     try:
                         if method == 'getaddrinfo':
                             result = socket.getaddrinfo(arg, None)
+                        elif method == 'gethostsbyname':
+                            result = self.gethostsbyname(arg)
                         else:
                             result = getattr(socket, method)(arg)
                     except Exception as e:
